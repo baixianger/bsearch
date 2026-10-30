@@ -412,11 +412,7 @@ pub fn discover_directory(skills_root: &Path) -> Result<BTreeMap<String, Skill>>
     discover_at(root, &skills_root, false)
 }
 
-fn discover_at(
-    root: &Path,
-    skills_root: &Path,
-    require_git: bool,
-) -> Result<BTreeMap<String, Skill>> {
+pub fn skill_files(skills_root: &Path, require_git: bool) -> Result<Vec<PathBuf>> {
     ensure!(skills_root.is_dir(), "Skill directory unavailable");
     let mut files = Vec::new();
     let mut builder = WalkBuilder::new(&skills_root);
@@ -444,10 +440,7 @@ fn discover_at(
             files.push(item.into_path());
         }
     }
-    // `git check-ignore` (the previous implementation) does not report tracked
-    // files, even if a later ignore rule matches them. The ignore walker alone
-    // would drop them, so merge tracked paths from the Git index without running Git.
-    let repo = match git2::Repository::discover(if require_git { root } else { skills_root }) {
+    let repo = match git2::Repository::discover(skills_root) {
         Ok(repo) => Some(repo),
         Err(e) if !require_git && e.code() == git2::ErrorCode::NotFound => None,
         Err(e) => return Err(e).context("Cannot open workspace Git repository"),
@@ -483,6 +476,47 @@ fn discover_at(
     }
     files.sort();
     files.dedup();
+    Ok(files)
+}
+
+fn file_stat(meta: &fs::Metadata) -> (u64, i64, u32) {
+    let len = meta.len();
+    let (secs, nanos) = match meta.modified() {
+        Ok(t) => match t.duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => (d.as_secs() as i64, d.subsec_nanos()),
+            Err(e) => (
+                -(e.duration().as_secs() as i64),
+                e.duration().subsec_nanos(),
+            ),
+        },
+        Err(_) => (0, 0),
+    };
+    (len, secs, nanos)
+}
+
+pub fn skill_file_stats(skills_root: &Path) -> Result<Vec<(String, u64, i64, u32)>> {
+    let skills_root = skills_root.canonicalize()?;
+    let files = skill_files(&skills_root, false)?;
+    let mut stats = Vec::with_capacity(files.len());
+    for p in files {
+        let rel = p
+            .strip_prefix(&skills_root)?
+            .to_str()
+            .context("Non-UTF-8 skill path")?
+            .to_owned();
+        let meta = fs::metadata(&p)?;
+        let (l, sec, nano) = file_stat(&meta);
+        stats.push((rel, l, sec, nano));
+    }
+    Ok(stats)
+}
+
+fn discover_at(
+    root: &Path,
+    skills_root: &Path,
+    require_git: bool,
+) -> Result<BTreeMap<String, Skill>> {
+    let files = skill_files(skills_root, require_git)?;
     let mut dirs: Vec<PathBuf> = files
         .iter()
         .filter(|p| p.file_name().is_some_and(|s| s == "SKILL.md"))

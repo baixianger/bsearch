@@ -44,7 +44,7 @@ bsearch collection scan skills
 ### 3. bSearch 技能检索特点
 - **按技能根聚合**：以一级子目录为独立单位，同一技能下可能包含多个分块，但最终取同技能所有片段中的**最高余弦相似度**作为该技能的得分。
 - **排除代码实现，聚焦文本语义**：仅对 `SKILL.md`、说明文档文本及附件路径进行分块嵌入，**严格忽略代码体（code bodies）**。这样能确保搜索结果不被具体实现细节的代码片段带偏，专注匹配技能的触发意图（trigger description）。
-- **直接输出技能名称**：检索返回的结果直接为该技能的一级目录路径或名称（例如 `git-helper`），Agent 可以直接依据输出决定激活哪个技能。
+- **直接输出技能绝对路径与名称**：检索返回的结果直接为该技能目录的绝对路径（`path`）与技能名（`name`），Agent 可以直接定位到 `<path>/SKILL.md`，无需猜测或手动拼装路径。
 
 ### 4. Agent 技能发现与调用规范
 当用户向 Agent 提出复杂任务或寻求某种专门能力时，Agent 应主动调用 bSearch 进行技能检索：
@@ -68,7 +68,7 @@ bsearch collection search skills "帮我审查 git 提交历史并进行 rebase"
   }
 ]
 ```
-Agent 依据最高分直接加载并阅读 `/Users/.../skills/git-helper/SKILL.md` 开展工作。
+Agent 依据最高分直接读取 `<path>/SKILL.md`（例如 `/Users/.../skills/git-helper/SKILL.md`）展开工作；若实际采纳了该技能，运行 `bsearch used <name>` 记录采纳度。
 
 ---
 

@@ -1,12 +1,11 @@
 {
   "root": "workspace",
   "database": "data/collections.sqlite3",
-  "skill_index": "data/legacy-skills.json",
   "document_roots": [],
   "include": ["**/*.md"],
   "exclude": ["archive/**", "**/archive/**"],
   "defaults": {"method": "vector", "format": "json"},
   "entries": {},
   "backend": "mlx-v2",
-  "workspace_collections": false
+  "workspace_collections": true
 }

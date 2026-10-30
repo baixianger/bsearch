@@ -530,13 +530,9 @@ impl App {
                 })
                 .unwrap_or_else(|| parent.join(&cfg.database)),
         )?;
-        let skills = if cfg.workspace_collections {
+        let skills = if cfg.workspace_collections || cfg.skill_index.as_os_str().is_empty() {
             db.clone()
         } else {
-            ensure!(
-                !cfg.skill_index.as_os_str().is_empty(),
-                "Legacy skill_index is required"
-            );
             normalize(&parent.join(&cfg.skill_index))?
         };
         let includes = globs(&cfg.include, true)?;

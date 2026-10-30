@@ -72,7 +72,7 @@ bsearch collection scan skills
 ### 3. Skill Retrieval Characteristics
 - **Directory Aggregation**: Ranks each skill by the highest cosine similarity among all its text chunks.
 - **Code-Body Exclusion**: Embeds `SKILL.md`, documentation text, and referenced asset paths while **strictly ignoring code implementations**. This avoids code noise and focuses retrieval on agent trigger descriptions and workflows.
-- **Skill Name Output**: Directly returns the skill root path and nickname (e.g. `git-helper`), allowing agents to immediately identify and adopt the required skill.
+- **Skill Path & Name Output**: Directly returns the absolute directory path of the skill (`path`) and its name (`name`). Agents can open and read `<path>/SKILL.md` directly, without needing to guess or construct paths.
 
 ```sh
 # Search for relevant skills by task description

@@ -137,6 +137,73 @@ fn get(db: &Connection, name: &str) -> Result<(Collection, Option<String>)> {
     .optional()?
     .context("Collection not found")
 }
+pub fn file_stat(meta: &fs::Metadata) -> (u64, i64, u32) {
+    let len = meta.len();
+    let (secs, nanos) = match meta.modified() {
+        Ok(t) => match t.duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => (d.as_secs() as i64, d.subsec_nanos()),
+            Err(e) => (
+                -(e.duration().as_secs() as i64),
+                e.duration().subsec_nanos(),
+            ),
+        },
+        Err(_) => (0, 0),
+    };
+    (len, secs, nanos)
+}
+
+pub fn compute_stat_fingerprint(stats: &[(String, u64, i64, u32)]) -> String {
+    let mut items: Vec<&(String, u64, i64, u32)> = stats.iter().collect();
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut hasher = Sha256::new();
+    for (rel, len, sec, nano) in items {
+        hasher.update(rel.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(&len.to_le_bytes());
+        hasher.update(&sec.to_le_bytes());
+        hasher.update(&nano.to_le_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn inventory_stats(
+    root: &Path,
+    includes: &GlobSet,
+    excludes: &GlobSet,
+) -> Result<Vec<(String, u64, i64, u32)>> {
+    let mut result = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).with_context(|| format!("Cannot read {}", dir.display()))? {
+            let entry = entry?;
+            let path = entry.path();
+            let ty = entry.file_type()?;
+            if ty.is_symlink() {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(root)?
+                .to_str()
+                .context("Non UTF-8 path")?
+                .replace('\\', "/");
+            if excludes.is_match(&rel) {
+                continue;
+            }
+            if ty.is_dir() {
+                if !entry.file_name().to_string_lossy().starts_with('.') {
+                    stack.push(path);
+                }
+            } else if ty.is_file() && includes.is_match(&rel) {
+                let meta = entry.metadata()?;
+                let (len, sec, nano) = file_stat(&meta);
+                result.push((rel, len, sec, nano));
+            }
+        }
+    }
+    result.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(result)
+}
+
 fn inventory(
     root: &Path,
     includes: &GlobSet,
@@ -203,7 +270,29 @@ where
         c.root.canonicalize()? == c.root,
         "Collection root changed or became a symlink"
     );
-    let files = inventory(&c.root, &glob(&[c.include.clone()])?, &glob(&c.exclude)?)?;
+    let inc_glob = glob(&[c.include.clone()])?;
+    let exc_glob = glob(&c.exclude)?;
+    let stats = inventory_stats(&c.root, &inc_glob, &exc_glob)?;
+    let stat_fingerprint = compute_stat_fingerprint(&stats);
+
+    let stored_stat: Option<String> = db
+        .query_row(
+            "SELECT value FROM collection_state WHERE collection=? AND key='stat_fingerprint'",
+            [name],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    if stored_stat.as_deref() == Some(&stat_fingerprint) && old_model.as_deref() == Some(model) {
+        let seen: usize = db.query_row(
+            "SELECT count(*) FROM files WHERE collection=?",
+            [name],
+            |r| r.get(0),
+        )?;
+        return Ok(serde_json::json!({"collection":name,"seen":seen,"changed":0,"embedded":0}));
+    }
+
+    let files = inventory(&c.root, &inc_glob, &exc_glob)?;
     let mut old = HashMap::new();
     {
         let mut s = db.prepare("SELECT path,hash FROM files WHERE collection=?")?;
@@ -287,6 +376,10 @@ where
     tx.execute(
         "UPDATE collections SET model=? WHERE name=?",
         params![model, name],
+    )?;
+    tx.execute(
+        "INSERT OR REPLACE INTO collection_state(collection,key,value) VALUES(?,'stat_fingerprint',?)",
+        params![name, stat_fingerprint],
     )?;
     tx.commit()?;
     Ok(
@@ -723,6 +816,7 @@ mod schema_tests {
 }
 
 /// Replace a complete skill snapshot atomically after validating its model and vectors.
+#[allow(dead_code)]
 #[cfg(any(test, feature = "metal-eval", feature = "test-backend"))]
 pub fn store_skill_index(
     db: &mut Connection,
@@ -883,6 +977,26 @@ where
         old_model.as_deref().is_none_or(|m| m == model),
         "Collection model changed; use a separate database"
     );
+    let stats = crate::native_skills::skill_file_stats(&collection.root)?;
+    let stat_fingerprint = compute_stat_fingerprint(&stats);
+
+    let stored_stat: Option<String> = db
+        .query_row(
+            "SELECT value FROM collection_state WHERE collection=? AND key='stat_fingerprint'",
+            [name],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    if stored_stat.as_deref() == Some(&stat_fingerprint) && old_model.as_deref() == Some(model) {
+        let count: usize = db.query_row(
+            "SELECT count(*) FROM skills WHERE collection=?",
+            [name],
+            |r| r.get(0),
+        )?;
+        return Ok(serde_json::json!({"collection":name,"skills":count,"changed":0,"embedded":0}));
+    }
+
     let exists: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM skill_indexes WHERE collection=?)",
         [name],
@@ -895,7 +1009,13 @@ where
     };
     let (index, result) =
         crate::native_skills::build_collection(&collection.root, previous, model, factory)?;
-    store_skill_index(db, name, &index, model)?;
+    let tx = db.transaction()?;
+    write_skill_index(&tx, name, &index, model)?;
+    tx.execute(
+        "INSERT OR REPLACE INTO collection_state(collection,key,value) VALUES(?,'stat_fingerprint',?)",
+        params![name, stat_fingerprint],
+    )?;
+    tx.commit()?;
     Ok(
         serde_json::json!({"collection":name,"skills":result.skills,"changed":result.changed,"embedded":result.embedded}),
     )
@@ -1162,11 +1282,27 @@ where
         indexed == inventory,
         "Source documents changed; refresh old index before migrating"
     );
+    let paths = crate::native_docs::inventory(cfg)?;
+    let mut stats = Vec::with_capacity(paths.len());
+    for p in &paths {
+        let rel = p
+            .strip_prefix(cfg.root)?
+            .to_str()
+            .context("Non-UTF-8 document path")?;
+        let meta = fs::metadata(p)?;
+        let (l, sec, nano) = file_stat(&meta);
+        stats.push((rel.to_owned(), l, sec, nano));
+    }
+    let stat_fingerprint = compute_stat_fingerprint(&stats);
     let tx = db.transaction()?;
     tx.execute("INSERT INTO collections(name,root,include,exclude,result,depth,returns,model) VALUES(?,?,'**/*.md','[]','workspace',1,'paths',?)", params![name,cfg.root.to_str().context("Non-UTF-8 workspace root")?,cfg.model_id])?;
     tx.execute(
         "INSERT INTO collection_state(collection,key,value) VALUES(?,'registry_sha',?)",
         params![name, cfg.metadata_fingerprint],
+    )?;
+    tx.execute(
+        "INSERT INTO collection_state(collection,key,value) VALUES(?,'stat_fingerprint',?)",
+        params![name, stat_fingerprint],
     )?;
     let mut files = 0usize;
     {
@@ -1262,7 +1398,55 @@ where
         fingerprint()? == cfg.metadata_fingerprint,
         "Workspace configuration changed before scanning"
     );
-    let inventory = workspace_inventory(cfg)?;
+    let paths = crate::native_docs::inventory(cfg)?;
+    let mut stats = Vec::with_capacity(paths.len());
+    for p in &paths {
+        let rel = p
+            .strip_prefix(cfg.root)?
+            .to_str()
+            .context("Non-UTF-8 document path")?;
+        let meta = fs::metadata(p)?;
+        let (l, sec, nano) = file_stat(&meta);
+        stats.push((rel.to_owned(), l, sec, nano));
+    }
+    let stat_fingerprint = compute_stat_fingerprint(&stats);
+
+    let stored_stat: Option<String> = db
+        .query_row(
+            "SELECT value FROM collection_state WHERE collection=? AND key='stat_fingerprint'",
+            [name],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let stored_registry: Option<String> = db
+        .query_row(
+            "SELECT value FROM collection_state WHERE collection=? AND key='registry_sha'",
+            [name],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    if stored_stat.as_deref() == Some(&stat_fingerprint)
+        && stored_registry.as_deref() == Some(&cfg.metadata_fingerprint)
+    {
+        let seen: usize = db.query_row(
+            "SELECT count(*) FROM files WHERE collection=?",
+            [name],
+            |r| r.get(0),
+        )?;
+        return Ok(
+            serde_json::json!({"collection":name,"seen":seen,"changed":0,"embedded":0,"removed":0}),
+        );
+    }
+    let mut inventory = std::collections::BTreeMap::new();
+    for p in paths {
+        let rel = p
+            .strip_prefix(cfg.root)?
+            .to_str()
+            .context("Non-UTF-8 document path")?
+            .to_owned();
+        inventory.insert(rel, crate::native_docs::hash_file(&p)?);
+    }
     let registry_path = cfg.root.join("entities/registry.json");
     let registry: serde_json::Value = if registry_path.exists() {
         serde_json::from_slice(&fs::read(registry_path)?)?
@@ -1469,6 +1653,10 @@ where
     tx.execute(
         "INSERT OR REPLACE INTO collection_state(collection,key,value) VALUES(?,'registry_sha',?)",
         params![name, cfg.metadata_fingerprint],
+    )?;
+    tx.execute(
+        "INSERT OR REPLACE INTO collection_state(collection,key,value) VALUES(?,'stat_fingerprint',?)",
+        params![name, stat_fingerprint],
     )?;
     tx.execute("DELETE FROM vector_cache WHERE model=? AND hash NOT IN (SELECT source_hash FROM chunks WHERE collection=? AND source_hash IS NOT NULL)",params![cfg.model_id,name])?;
     tx.commit()?;
