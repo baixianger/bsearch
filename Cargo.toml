@@ -1,0 +1,44 @@
+[package]
+name = "bsearch"
+version = "0.1.0"
+edition = "2024"
+description = "Directory-scoped local document and skill retrieval"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+globset = "0.4"
+git2 = { version = "0.21", default-features = false }
+ignore = "0.4"
+libc = "0.2"
+md-5 = "0.10"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+crispembed = { version = "=0.16.1", features = ["metal"], optional = true }
+crispembed-sys = { version = "=0.16.1", features = ["metal"], optional = true }
+mlx-rs = { version = "=0.33.0", optional = true }
+tokenizers = { version = "=0.23.2", optional = true }
+
+[features]
+default = ["gemma2-mlx"]
+metal-eval = ["dep:crispembed", "dep:crispembed-sys"]
+test-backend = []
+gemma2-mlx = ["metal-eval", "dep:mlx-rs", "dep:tokenizers"]
+
+[dev-dependencies]
+tempfile = "3"
+memmap2 = "0.9"
+safetensors = "=0.8.0"
+
+[[bin]]
+name = "bsearch"
+path = "src/main.rs"
+
+
+[[example]]
+name = "gemma2_validate"
+required-features = ["gemma2-mlx"]

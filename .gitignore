@@ -1,0 +1,7 @@
+/target/
+/config.json
+/workspace/
+/data/
+*.sqlite3*
+*.safetensors
+*.gguf
